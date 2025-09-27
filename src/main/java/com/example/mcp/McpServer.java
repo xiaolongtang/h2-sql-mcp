@@ -75,16 +75,15 @@ public class McpServer {
     private Map<String, String> readHeaders(BufferedInputStream in) throws IOException {
         Map<String, String> headers = new HashMap<>();
         StringBuilder current = new StringBuilder();
-        int previous = -1;
         int b;
         boolean seenAny = false;
         while ((b = in.read()) != -1) {
             seenAny = true;
-            if (b == '\n' && previous == '\r') {
-                if (current.length() == 0) {
+            if (b == '\n') {
+                String line = stripTrailingCarriageReturn(current);
+                if (line.isEmpty()) {
                     return headers;
                 }
-                String line = current.substring(0, current.length() - 1);
                 int colonIndex = line.indexOf(':');
                 if (colonIndex > 0) {
                     String name = line.substring(0, colonIndex).trim().toLowerCase(Locale.ROOT);
@@ -95,20 +94,31 @@ public class McpServer {
             } else {
                 current.append((char) b);
             }
-            previous = b;
         }
         if (!seenAny) {
             return null;
         }
         if (current.length() > 0) {
-            int colonIndex = current.indexOf(":");
+            String line = stripTrailingCarriageReturn(current);
+            int colonIndex = line.indexOf(":");
             if (colonIndex > 0) {
-                String name = current.substring(0, colonIndex).trim().toLowerCase(Locale.ROOT);
-                String value = current.substring(colonIndex + 1).trim();
+                String name = line.substring(0, colonIndex).trim().toLowerCase(Locale.ROOT);
+                String value = line.substring(colonIndex + 1).trim();
                 headers.put(name, value);
             }
         }
         return headers.isEmpty() && !seenAny ? null : headers;
+    }
+
+    private String stripTrailingCarriageReturn(StringBuilder builder) {
+        int length = builder.length();
+        if (length == 0) {
+            return "";
+        }
+        if (builder.charAt(length - 1) == '\r') {
+            return builder.substring(0, length - 1);
+        }
+        return builder.toString();
     }
 
     private void handleRequest(JsonNode request, BufferedOutputStream out) throws IOException {
