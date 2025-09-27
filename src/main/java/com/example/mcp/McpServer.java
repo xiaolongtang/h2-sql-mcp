@@ -8,27 +8,27 @@ import com.example.mcp.tools.ToolRegistry;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.modelcontextprotocol.json.McpJsonMapper;
+import io.modelcontextprotocol.server.McpServerFeatures;
+import io.modelcontextprotocol.server.McpSyncServer;
+import io.modelcontextprotocol.server.transport.StdioServerTransportProvider;
+import io.modelcontextprotocol.spec.McpSchema;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import java.io.BufferedInputStream;
-import java.io.BufferedOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.nio.charset.StandardCharsets;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Locale;
-import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Minimal MCP server implementation that communicates over stdio using JSON-RPC messages
- * framed with Content-Length headers (compatible with LSP style transport).
+ * MCP server bootstrap that exposes SQL migration utilities over the Anthropics MCP Java SDK.
  */
 public class McpServer {
 
+    private static final Logger LOGGER = LoggerFactory.getLogger(McpServer.class);
+
     private final ObjectMapper mapper = new ObjectMapper();
+    private final McpJsonMapper mcpJsonMapper = McpJsonMapper.getDefault();
     private final ToolRegistry registry = new ToolRegistry();
 
     public McpServer() {
@@ -37,169 +37,125 @@ public class McpServer {
         registry.register(new SqlRewriteTool(mapper));
     }
 
-    public static void main(String[] args) throws IOException {
-        McpServer server = new McpServer();
-        server.run(System.in, System.out);
+    public static void main(String[] args) {
+        new McpServer().start();
     }
 
-    public void run(InputStream inStream, OutputStream outStream) throws IOException {
-        BufferedInputStream in = new BufferedInputStream(inStream);
-        BufferedOutputStream out = new BufferedOutputStream(outStream);
+    public void start() {
+        List<McpServerFeatures.SyncToolSpecification> tools = registry.list().stream()
+                .map(this::toToolSpecification)
+                .toList();
 
-        while (true) {
-            Map<String, String> headers = readHeaders(in);
-            if (headers == null) {
-                break;
-            }
-            String lengthHeader = headers.get("content-length");
-            if (lengthHeader == null) {
-                continue;
-            }
-            int length = Integer.parseInt(lengthHeader.trim());
-            byte[] payload = in.readNBytes(length);
-            if (payload.length < length) {
-                break;
-            }
-            String json = new String(payload, StandardCharsets.UTF_8);
-            JsonNode requestNode;
-            try {
-                requestNode = mapper.readTree(json);
-            } catch (JsonProcessingException e) {
-                continue;
-            }
-            handleRequest(requestNode, out);
-            out.flush();
-        }
+        StdioServerTransportProvider transportProvider = new StdioServerTransportProvider(mcpJsonMapper);
+
+        McpSyncServer server = io.modelcontextprotocol.server.McpServer
+                .sync(transportProvider)
+                .serverInfo(new McpSchema.Implementation("h2-sql-mcp", "0.1.0"))
+                .jsonMapper(mcpJsonMapper)
+                .tools(tools)
+                .build();
+
+        keepServerAlive(server, tools.size());
     }
 
-    private Map<String, String> readHeaders(BufferedInputStream in) throws IOException {
-        Map<String, String> headers = new HashMap<>();
-        StringBuilder current = new StringBuilder();
-        int b;
-        boolean seenAny = false;
-        while ((b = in.read()) != -1) {
-            seenAny = true;
-            if (b == '\n') {
-                String line = stripTrailingCarriageReturn(current);
-                if (line.isEmpty()) {
-                    return headers;
+    private void keepServerAlive(McpSyncServer server, int toolCount) {
+        CountDownLatch shutdown = new CountDownLatch(1);
+        AtomicBoolean closed = new AtomicBoolean(false);
+
+        Runnable shutdownHook = () -> {
+            if (closed.compareAndSet(false, true)) {
+                try {
+                    LOGGER.info("Shutting down MCP server");
+                    server.closeGracefully();
+                } catch (Exception e) {
+                    LOGGER.warn("Error while shutting down MCP server", e);
+                } finally {
+                    shutdown.countDown();
                 }
-                int colonIndex = line.indexOf(':');
-                if (colonIndex > 0) {
-                    String name = line.substring(0, colonIndex).trim().toLowerCase(Locale.ROOT);
-                    String value = line.substring(colonIndex + 1).trim();
-                    headers.put(name, value);
-                }
-                current.setLength(0);
-            } else {
-                current.append((char) b);
             }
-        }
-        if (!seenAny) {
-            return null;
-        }
-        if (current.length() > 0) {
-            String line = stripTrailingCarriageReturn(current);
-            int colonIndex = line.indexOf(":");
-            if (colonIndex > 0) {
-                String name = line.substring(0, colonIndex).trim().toLowerCase(Locale.ROOT);
-                String value = line.substring(colonIndex + 1).trim();
-                headers.put(name, value);
-            }
-        }
-        return headers.isEmpty() && !seenAny ? null : headers;
-    }
+        };
 
-    private String stripTrailingCarriageReturn(StringBuilder builder) {
-        int length = builder.length();
-        if (length == 0) {
-            return "";
-        }
-        if (builder.charAt(length - 1) == '\r') {
-            return builder.substring(0, length - 1);
-        }
-        return builder.toString();
-    }
+        Runtime.getRuntime().addShutdownHook(new Thread(shutdownHook, "mcp-server-shutdown"));
 
-    private void handleRequest(JsonNode request, BufferedOutputStream out) throws IOException {
-        String method = request.path("method").asText();
-        JsonNode idNode = request.get("id");
-        JsonNode params = request.get("params");
-        ObjectNode response = mapper.createObjectNode();
-        response.put("jsonrpc", "2.0");
-        if (idNode != null) {
-            response.set("id", idNode);
-        } else {
-            response.putNull("id");
-        }
-
-        switch (method) {
-            case "initialize" -> response.set("result", createInitializeResult());
-            case "tools/list" -> response.set("result", createToolsListResult());
-            case "tools/call" -> response.set("result", handleToolsCall(params, response));
-            default -> {
-                response.putNull("result");
-                ObjectNode error = mapper.createObjectNode();
-                error.put("code", -32601);
-                error.put("message", "Method not found: " + method);
-                response.set("error", error);
-            }
-        }
-        byte[] payload = mapper.writeValueAsBytes(response);
-        String header = "Content-Length: " + payload.length + "\r\n\r\n";
-        out.write(header.getBytes(StandardCharsets.UTF_8));
-        out.write(payload);
-    }
-
-    private JsonNode createInitializeResult() {
-        ObjectNode result = mapper.createObjectNode();
-        result.put("protocolVersion", "0.1.0");
-        ObjectNode capabilities = mapper.createObjectNode();
-        result.set("capabilities", capabilities);
-        return result;
-    }
-
-    private JsonNode createToolsListResult() {
-        ArrayNode array = mapper.createArrayNode();
-        List<Tool> tools = registry.list();
-        for (Tool tool : tools) {
-            ObjectNode entry = mapper.createObjectNode();
-            entry.put("name", tool.getName());
-            entry.put("description", tool.getDescription());
-            entry.set("inputSchema", tool.getInputSchema());
-            array.add(entry);
-        }
-        ObjectNode result = mapper.createObjectNode();
-        result.set("tools", array);
-        return result;
-    }
-
-    private JsonNode handleToolsCall(JsonNode params, ObjectNode response) {
-        if (params == null || !params.hasNonNull("name")) {
-            ObjectNode error = mapper.createObjectNode();
-            error.put("code", -32602);
-            error.put("message", "Missing tool name");
-            response.set("error", error);
-            return mapper.nullNode();
-        }
-        String name = params.get("name").asText();
-        Tool tool = registry.get(name);
-        if (tool == null) {
-            ObjectNode error = mapper.createObjectNode();
-            error.put("code", -32602);
-            error.put("message", "Unknown tool: " + name);
-            response.set("error", error);
-            return mapper.nullNode();
-        }
-        JsonNode arguments = params.get("arguments");
+        LOGGER.info("MCP server started with {} tool(s); awaiting requests...", toolCount);
         try {
-            return tool.call(arguments == null ? mapper.createObjectNode() : arguments);
-        } catch (Exception e) {
-            ObjectNode error = mapper.createObjectNode();
-            error.put("code", -32000);
-            error.put("message", e.getMessage());
-            response.set("error", error);
-            return mapper.nullNode();
+            shutdown.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            LOGGER.warn("MCP server interrupted; shutting down");
+            shutdownHook.run();
+        }
+    }
+
+    private McpServerFeatures.SyncToolSpecification toToolSpecification(Tool tool) {
+        McpSchema.Tool descriptor = buildToolDescriptor(tool);
+        return McpServerFeatures.SyncToolSpecification.builder()
+                .tool(descriptor)
+                .callHandler((exchange, request) -> executeTool(tool, request))
+                .build();
+    }
+
+    private McpSchema.Tool buildToolDescriptor(Tool tool) {
+        String schemaJson = serializeSchema(tool);
+        return McpSchema.Tool.builder()
+                .name(tool.getName())
+                .description(tool.getDescription())
+                .inputSchema(mcpJsonMapper, schemaJson)
+                .build();
+    }
+
+    private String serializeSchema(Tool tool) {
+        JsonNode schema = tool.getInputSchema();
+        if (schema == null) {
+            throw new IllegalStateException("Tool " + tool.getName() + " must provide an input schema");
+        }
+        return schema.toString();
+    }
+
+    private McpSchema.CallToolResult executeTool(Tool tool, McpSchema.CallToolRequest request) {
+        JsonNode arguments = toArgumentsNode(request);
+        try {
+            JsonNode result = tool.call(arguments);
+            McpSchema.CallToolResult.Builder builder = McpSchema.CallToolResult.builder().isError(false);
+            if (result == null || result.isNull()) {
+                builder.addTextContent("null");
+            } else {
+                Object structured = mapper.convertValue(result, Object.class);
+                builder.structuredContent(structured);
+                builder.addTextContent(renderResultText(result));
+            }
+            return builder.build();
+        } catch (Exception ex) {
+            LOGGER.error("Tool '{}' execution failed", tool.getName(), ex);
+            String message = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
+            return McpSchema.CallToolResult.builder()
+                    .isError(true)
+                    .addTextContent("Tool execution failed: " + message)
+                    .build();
+        }
+    }
+
+    private JsonNode toArgumentsNode(McpSchema.CallToolRequest request) {
+        if (request.arguments() == null) {
+            return mapper.createObjectNode();
+        }
+        return mapper.valueToTree(request.arguments());
+    }
+
+    private String renderResultText(JsonNode result) {
+        if (result == null || result.isNull()) {
+            return "null";
+        }
+        if (result.isTextual()) {
+            return result.asText();
+        }
+        if (result.isNumber() || result.isBoolean()) {
+            return result.toString();
+        }
+        try {
+            return mapper.writeValueAsString(result);
+        } catch (JsonProcessingException e) {
+            return result.toString();
         }
     }
 }
