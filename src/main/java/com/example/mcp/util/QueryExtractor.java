@@ -22,7 +22,7 @@ import java.util.regex.Pattern;
 
 public class QueryExtractor {
     private static final Pattern CLASS_PATTERN = Pattern.compile("(public\\s+)?(class|interface)\\s+(\\w+)");
-    private static final Pattern QUERY_PATTERN = Pattern.compile("@Query\\s*\\((.*?)\\)", Pattern.DOTALL);
+    private static final Pattern QUERY_PATTERN = Pattern.compile("@Query\\s*\\(");
     private static final Pattern STRING_PATTERN = Pattern.compile(
             "\"\"\"([\\s\\S]*?)\"\"\"|\"(\\\\.|[^\\\\\"])*\""
     );
@@ -106,25 +106,26 @@ public class QueryExtractor {
         Matcher matcher = QUERY_PATTERN.matcher(content);
         int searchStart = 0;
         while (matcher.find(searchStart)) {
-            String body = matcher.group(1);
-            if (body == null) {
+            AnnotationMatch annotation = extractAnnotationBody(content, matcher.end());
+            if (annotation == null) {
                 searchStart = matcher.end();
                 continue;
             }
+            String body = annotation.body();
             String normalizedBody = body.toLowerCase(Locale.ROOT);
             if (!NATIVE_QUERY_FLAG_PATTERN.matcher(normalizedBody).find()) {
-                searchStart = matcher.end();
+                searchStart = annotation.endIndex();
                 continue;
             }
             Matcher stringMatcher = STRING_PATTERN.matcher(body);
             if (!stringMatcher.find()) {
-                searchStart = matcher.end();
+                searchStart = annotation.endIndex();
                 continue;
             }
             String rawLiteral = stringMatcher.group();
             String sqlRaw = decodeLiteral(rawLiteral);
 
-            String methodName = detectMethodName(content, matcher.end());
+            String methodName = detectMethodName(content, annotation.endIndex());
             ParamNormalizer.Result normalized = ParamNormalizer.normalize(sqlRaw);
             List<RuleHit> hits = ruleEngine.findHits(sqlRaw);
             String id = repoName + (methodName == null ? "" : "#" + methodName);
@@ -138,9 +139,128 @@ public class QueryExtractor {
                     normalized.placeholders(),
                     hits
             ));
-            searchStart = matcher.end();
+            searchStart = annotation.endIndex();
         }
         return result;
+    }
+
+    private AnnotationMatch extractAnnotationBody(String content, int startIndex) {
+        int length = content.length();
+        int depth = 1;
+        int index = startIndex;
+        boolean inLineComment = false;
+        boolean inBlockComment = false;
+        boolean inSingleQuote = false;
+        boolean inDoubleQuote = false;
+        boolean inTextBlock = false;
+
+        while (index < length) {
+            char current = content.charAt(index);
+            char next = index + 1 < length ? content.charAt(index + 1) : '\0';
+
+            if (inLineComment) {
+                if (current == '\n' || current == '\r') {
+                    inLineComment = false;
+                }
+                index++;
+                continue;
+            }
+
+            if (inBlockComment) {
+                if (current == '*' && next == '/') {
+                    inBlockComment = false;
+                    index += 2;
+                } else {
+                    index++;
+                }
+                continue;
+            }
+
+            if (inTextBlock) {
+                if (current == '"' && next == '"' && index + 2 < length && content.charAt(index + 2) == '"') {
+                    inTextBlock = false;
+                    index += 3;
+                } else {
+                    index++;
+                }
+                continue;
+            }
+
+            if (inSingleQuote) {
+                if (current == '\\' && next != '\0') {
+                    index += 2;
+                    continue;
+                }
+                if (current == '\'') {
+                    inSingleQuote = false;
+                }
+                index++;
+                continue;
+            }
+
+            if (inDoubleQuote) {
+                if (current == '\\' && next != '\0') {
+                    index += 2;
+                    continue;
+                }
+                if (current == '"') {
+                    inDoubleQuote = false;
+                }
+                index++;
+                continue;
+            }
+
+            if (current == '/' && next == '/') {
+                inLineComment = true;
+                index += 2;
+                continue;
+            }
+
+            if (current == '/' && next == '*') {
+                inBlockComment = true;
+                index += 2;
+                continue;
+            }
+
+            if (current == '"') {
+                if (next == '"' && index + 2 < length && content.charAt(index + 2) == '"') {
+                    inTextBlock = true;
+                    index += 3;
+                } else {
+                    inDoubleQuote = true;
+                    index++;
+                }
+                continue;
+            }
+
+            if (current == '\'') {
+                inSingleQuote = true;
+                index++;
+                continue;
+            }
+
+            if (current == '(') {
+                depth++;
+                index++;
+                continue;
+            }
+
+            if (current == ')') {
+                depth--;
+                if (depth == 0) {
+                    String body = content.substring(startIndex, index);
+                    return new AnnotationMatch(body, index + 1);
+                }
+                index++;
+                continue;
+            }
+
+            index++;
+        }
+        return null;
+    }
+
+    private record AnnotationMatch(String body, int endIndex) {
     }
 
     private String readContent(Path file) throws IOException {
