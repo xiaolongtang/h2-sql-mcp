@@ -79,7 +79,7 @@ public class JpaListNativeQueriesTool implements Tool {
                         .filter(path -> shouldInclude(root, path, includeGlobs, excludeGlobs))
                         .forEach(path -> {
                             try {
-                                String relative = root.relativize(path).toString().replace('\\', '/');
+                                String relative = normalizeToUnixSeparators(root.relativize(path).toString());
                                 List<QueryItem> items = extractor.extract(path, relative);
                                 for (QueryItem item : items) {
                                     String key = item.id() + "@" + relative;
@@ -102,7 +102,7 @@ public class JpaListNativeQueriesTool implements Tool {
 
     private boolean shouldInclude(Path root, Path file, List<String> includes, List<String> excludes) {
         Path relative = root.relativize(file);
-        String normalized = relative.toString().replace('\\', '/');
+        String normalized = normalizeToUnixSeparators(relative.toString());
         if (!includes.isEmpty() && includes.stream().noneMatch(glob -> matchesGlob(normalized, glob))) {
             return false;
         }
@@ -113,8 +113,10 @@ public class JpaListNativeQueriesTool implements Tool {
     }
 
     private boolean matchesGlob(String path, String glob) {
-        return FileSystems.getDefault().getPathMatcher("glob:" + glob)
-                .matches(Path.of(path));
+        String globForSystem = normalizeToSystemSeparators(glob);
+        Path pathForSystem = Path.of(normalizeToSystemSeparators(path));
+        return FileSystems.getDefault().getPathMatcher("glob:" + globForSystem)
+                .matches(pathForSystem);
     }
 
     private List<Path> readPathArray(JsonNode node) {
@@ -123,7 +125,7 @@ public class JpaListNativeQueriesTool implements Tool {
             return paths;
         }
         for (JsonNode element : node) {
-            paths.add(Path.of(element.asText()));
+            paths.add(Path.of(normalizeToSystemSeparators(element.asText())));
         }
         return paths;
     }
@@ -172,5 +174,20 @@ public class JpaListNativeQueriesTool implements Tool {
         } else {
             node.put(key, value);
         }
+    }
+
+    private String normalizeToUnixSeparators(String path) {
+        return path.replace('\\', '/');
+    }
+
+    private String normalizeToSystemSeparators(String path) {
+        if (path == null) {
+            return null;
+        }
+        String separator = FileSystems.getDefault().getSeparator();
+        if ("\\".equals(separator)) {
+            return path.replace('/', '\\');
+        }
+        return path.replace('\\', '/');
     }
 }
