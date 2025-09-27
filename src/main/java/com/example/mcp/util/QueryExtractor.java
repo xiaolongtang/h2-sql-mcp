@@ -23,13 +23,79 @@ import java.util.regex.Pattern;
 public class QueryExtractor {
     private static final Pattern CLASS_PATTERN = Pattern.compile("(public\\s+)?(class|interface)\\s+(\\w+)");
     private static final Pattern QUERY_PATTERN = Pattern.compile("@Query\\s*\\((.*?)\\)", Pattern.DOTALL);
-    private static final Pattern STRING_PATTERN = Pattern.compile("\"(\\\\.|[^\\\\\"])*\"");
+    private static final Pattern STRING_PATTERN = Pattern.compile(
+            "\"\"\"([\\s\\S]*?)\"\"\"|\"(\\\\.|[^\\\\\"])*\""
+    );
     private static final Pattern METHOD_PATTERN = Pattern.compile("(?:public|protected|private|default)?\\s*(?:static\\s+)?[\\w<>,\\s\\[\\]]+\\s+(\\w+)\\s*\\(");
 
     private final RuleEngine ruleEngine;
 
     public QueryExtractor(RuleEngine ruleEngine) {
         this.ruleEngine = ruleEngine;
+    }
+
+    private String decodeLiteral(String rawLiteral) {
+        if (rawLiteral.startsWith("\"\"\"")) {
+            return decodeTextBlock(rawLiteral);
+        }
+        return StringEscapeUtils.unescapeJava(rawLiteral.substring(1, rawLiteral.length() - 1));
+    }
+
+    private String decodeTextBlock(String rawLiteral) {
+        String content = rawLiteral.substring(3, rawLiteral.length() - 3);
+        content = content.replace("\r\n", "\n");
+        if (content.startsWith("\n")) {
+            content = content.substring(1);
+        }
+        String[] lines = content.split("\n", -1);
+        int indent = findCommonIndent(lines);
+        StringBuilder builder = new StringBuilder();
+        for (int i = 0; i < lines.length; i++) {
+            String line = lines[i];
+            if (indent > 0) {
+                line = removeIndent(line, indent);
+            }
+            builder.append(line);
+            if (i < lines.length - 1) {
+                builder.append('\n');
+            }
+        }
+        String result = builder.toString();
+        return StringEscapeUtils.unescapeJava(result);
+    }
+
+    private int findCommonIndent(String[] lines) {
+        int indent = Integer.MAX_VALUE;
+        for (String line : lines) {
+            if (line.isBlank()) {
+                continue;
+            }
+            int count = 0;
+            while (count < line.length()) {
+                char ch = line.charAt(count);
+                if (ch == ' ' || ch == '\t') {
+                    count++;
+                } else {
+                    break;
+                }
+            }
+            indent = Math.min(indent, count);
+        }
+        return indent == Integer.MAX_VALUE ? 0 : indent;
+    }
+
+    private String removeIndent(String line, int indent) {
+        int remove = Math.min(indent, line.length());
+        int index = 0;
+        while (index < remove) {
+            char ch = line.charAt(index);
+            if (ch == ' ' || ch == '\t') {
+                index++;
+            } else {
+                break;
+            }
+        }
+        return line.substring(index);
     }
 
     public List<QueryItem> extract(Path file, String relativePath) throws IOException {
@@ -55,7 +121,7 @@ public class QueryExtractor {
                 continue;
             }
             String rawLiteral = stringMatcher.group();
-            String sqlRaw = StringEscapeUtils.unescapeJava(rawLiteral.substring(1, rawLiteral.length() - 1));
+            String sqlRaw = decodeLiteral(rawLiteral);
 
             String methodName = detectMethodName(content, matcher.end());
             ParamNormalizer.Result normalized = ParamNormalizer.normalize(sqlRaw);
