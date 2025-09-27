@@ -7,6 +7,9 @@ import com.example.mcp.util.ParamNormalizer.Result;
 import org.apache.commons.text.StringEscapeUtils;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharsetDecoder;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -29,7 +32,7 @@ public class QueryExtractor {
     }
 
     public List<QueryItem> extract(Path file, String relativePath) throws IOException {
-        String content = Files.readString(file, StandardCharsets.UTF_8);
+        String content = readContent(file);
         String repoName = detectRepoName(content, file.getFileName().toString());
         List<QueryItem> result = new ArrayList<>();
         Matcher matcher = QUERY_PATTERN.matcher(content);
@@ -70,6 +73,15 @@ public class QueryExtractor {
             searchStart = matcher.end();
         }
         return result;
+    }
+
+    private String readContent(Path file) throws IOException {
+        CharsetDecoder decoder = StandardCharsets.UTF_8
+                .newDecoder()
+                .onMalformedInput(CodingErrorAction.REPLACE)
+                .onUnmappableCharacter(CodingErrorAction.REPLACE);
+        ByteBuffer buffer = ByteBuffer.wrap(Files.readAllBytes(file));
+        return decoder.decode(buffer).toString();
     }
 
     private String detectRepoName(String content, String fallback) {
