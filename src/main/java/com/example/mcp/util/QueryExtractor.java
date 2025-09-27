@@ -27,6 +27,7 @@ public class QueryExtractor {
             "\"\"\"([\\s\\S]*?)\"\"\"|\"(\\\\.|[^\\\\\"])*\""
     );
     private static final Pattern METHOD_PATTERN = Pattern.compile("(?:public|protected|private|default)?\\s*(?:static\\s+)?[\\w<>,\\s\\[\\]]+\\s+(\\w+)\\s*\\(");
+    private static final Pattern NATIVE_QUERY_FLAG_PATTERN = Pattern.compile("nativequery\\s*=\\s*true");
 
     private final RuleEngine ruleEngine;
 
@@ -111,7 +112,7 @@ public class QueryExtractor {
                 continue;
             }
             String normalizedBody = body.toLowerCase(Locale.ROOT);
-            if (!normalizedBody.contains("nativequery=true")) {
+            if (!NATIVE_QUERY_FLAG_PATTERN.matcher(normalizedBody).find()) {
                 searchStart = matcher.end();
                 continue;
             }
