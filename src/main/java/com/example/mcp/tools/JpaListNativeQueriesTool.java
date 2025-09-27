@@ -69,6 +69,7 @@ public class JpaListNativeQueriesTool implements Tool {
         List<String> excludeGlobs = readStringArray(arguments.get("excludeGlobs"));
 
         ArrayNode queriesNode = mapper.createArrayNode();
+        ArrayNode errorsNode = mapper.createArrayNode();
         Set<String> seen = new HashSet<>();
         for (Path root : roots) {
             if (!Files.exists(root)) {
@@ -78,8 +79,8 @@ public class JpaListNativeQueriesTool implements Tool {
                 stream.filter(Files::isRegularFile)
                         .filter(path -> shouldInclude(root, path, includeGlobs, excludeGlobs))
                         .forEach(path -> {
+                            String relative = normalizeToUnixSeparators(root.relativize(path).toString());
                             try {
-                                String relative = normalizeToUnixSeparators(root.relativize(path).toString());
                                 List<QueryItem> items = extractor.extract(path, relative);
                                 for (QueryItem item : items) {
                                     String key = item.id() + "@" + relative;
@@ -88,7 +89,11 @@ public class JpaListNativeQueriesTool implements Tool {
                                     }
                                 }
                             } catch (IOException e) {
-                                throw new RuntimeException(e);
+                                errorsNode.add(String.format(
+                                        "Failed to read '%s': %s",
+                                        relative,
+                                        e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()
+                                ));
                             }
                         });
             } catch (IOException e) {
@@ -97,6 +102,9 @@ public class JpaListNativeQueriesTool implements Tool {
         }
         ObjectNode result = mapper.createObjectNode();
         result.set("queries", queriesNode);
+        if (!errorsNode.isEmpty()) {
+            result.set("errors", errorsNode);
+        }
         return result;
     }
 
