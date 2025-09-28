@@ -22,7 +22,7 @@ import java.util.regex.Pattern;
 
 public class QueryExtractor {
     private static final Pattern CLASS_PATTERN = Pattern.compile("(public\\s+)?(class|interface)\\s+(\\w+)");
-    private static final Pattern QUERY_PATTERN = Pattern.compile("@Query\\s*\\(");
+    private static final Pattern QUERY_PATTERN = Pattern.compile("@(?:[A-Za-z_][\\w$]*\\.)*Query\\s*\\(");
     private static final Pattern STRING_PATTERN = Pattern.compile(
             "\"\"\"([\\s\\S]*?)\"\"\"|\"(\\\\.|[^\\\\\"])*\""
     );
