@@ -18,8 +18,15 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.stream.Collectors;
 
 public class JpaListNativeQueriesTool implements Tool {
+    private static final int MAX_THREADS = 15;
+
     private final ObjectMapper mapper;
     private final QueryExtractor extractor;
 
@@ -75,29 +82,49 @@ public class JpaListNativeQueriesTool implements Tool {
             if (!Files.exists(root)) {
                 continue;
             }
+            List<Path> files;
             try (var stream = Files.walk(root)) {
-                stream.filter(Files::isRegularFile)
+                files = stream.filter(Files::isRegularFile)
                         .filter(path -> shouldInclude(root, path, includeGlobs, excludeGlobs))
-                        .forEach(path -> {
-                            String relative = normalizeToUnixSeparators(root.relativize(path).toString());
-                            try {
-                                List<QueryItem> items = extractor.extract(path, relative);
-                                for (QueryItem item : items) {
-                                    String key = item.id() + "@" + relative;
-                                    if (seen.add(key)) {
-                                        queriesNode.add(serialize(item));
-                                    }
-                                }
-                            } catch (IOException e) {
-                                errorsNode.add(String.format(
-                                        "Failed to read '%s': %s",
-                                        relative,
-                                        e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()
-                                ));
-                            }
-                        });
+                        .collect(Collectors.toList());
             } catch (IOException e) {
                 throw new RuntimeException("Failed to scan root: " + root, e);
+            }
+            if (files.isEmpty()) {
+                continue;
+            }
+            ExecutorService executor = Executors.newFixedThreadPool(Math.min(MAX_THREADS, files.size()));
+            List<Future<FileScanResult>> futures = new ArrayList<>();
+            try {
+                for (Path path : files) {
+                    futures.add(executor.submit(() -> scanFile(root, path)));
+                }
+                for (Future<FileScanResult> future : futures) {
+                    FileScanResult result;
+                    try {
+                        result = future.get();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new RuntimeException("Scanning interrupted", e);
+                    } catch (ExecutionException e) {
+                        Throwable cause = e.getCause();
+                        if (cause instanceof RuntimeException runtime) {
+                            throw runtime;
+                        }
+                        throw new RuntimeException("Failed to scan file under root: " + root, cause);
+                    }
+                    for (QueryItem item : result.items()) {
+                        String key = item.id() + "@" + item.file();
+                        if (seen.add(key)) {
+                            queriesNode.add(serialize(item));
+                        }
+                    }
+                    for (String error : result.errors()) {
+                        errorsNode.add(error);
+                    }
+                }
+            } finally {
+                executor.shutdownNow();
             }
         }
         ObjectNode result = mapper.createObjectNode();
@@ -149,6 +176,21 @@ public class JpaListNativeQueriesTool implements Tool {
         return values;
     }
 
+    private FileScanResult scanFile(Path root, Path path) {
+        String relative = normalizeToUnixSeparators(root.relativize(path).toString());
+        try {
+            List<QueryItem> items = extractor.extract(path, relative);
+            return new FileScanResult(items, List.of());
+        } catch (IOException e) {
+            String message = String.format(
+                    "Failed to read '%s': %s",
+                    relative,
+                    e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()
+            );
+            return new FileScanResult(List.of(), List.of(message));
+        }
+    }
+
     private ObjectNode serialize(QueryItem item) {
         ObjectNode node = mapper.createObjectNode();
         node.put("id", item.id());
@@ -197,5 +239,8 @@ public class JpaListNativeQueriesTool implements Tool {
             return path.replace('/', '\\');
         }
         return path.replace('\\', '/');
+    }
+
+    private record FileScanResult(List<QueryItem> items, List<String> errors) {
     }
 }
