@@ -99,7 +99,7 @@ public final class ParamNormalizer {
                 }
                 String token = sql.substring(start, i);
                 placeholders.add(new Placeholder("positional", token));
-                normalized.append('?');
+                appendPlaceholder(normalized, '?');
                 i--;
                 continue;
             }
@@ -116,7 +116,7 @@ public final class ParamNormalizer {
                 }
                 String token = sql.substring(start, i);
                 placeholders.add(new Placeholder("named", token));
-                normalized.append('?');
+                appendPlaceholder(normalized, '?');
                 i--;
                 continue;
             }
@@ -125,5 +125,45 @@ public final class ParamNormalizer {
         }
 
         return new Result(normalized.toString(), placeholders);
+    }
+
+    private static void appendPlaceholder(StringBuilder normalized, char placeholder) {
+        if (needsInClauseWrapping(normalized)) {
+            normalized.append('(').append(placeholder).append(')');
+        } else {
+            normalized.append(placeholder);
+        }
+    }
+
+    private static boolean needsInClauseWrapping(StringBuilder normalized) {
+        int index = normalized.length() - 1;
+        while (index >= 0 && Character.isWhitespace(normalized.charAt(index))) {
+            index--;
+        }
+        if (index >= 0 && normalized.charAt(index) == '(') {
+            return false;
+        }
+        if (index < 0 || !equalsIgnoreCase(normalized.charAt(index), 'n')) {
+            return false;
+        }
+        index--;
+        while (index >= 0 && Character.isWhitespace(normalized.charAt(index))) {
+            index--;
+        }
+        if (index < 0 || !equalsIgnoreCase(normalized.charAt(index), 'i')) {
+            return false;
+        }
+        int beforeI = index - 1;
+        if (beforeI >= 0) {
+            char ch = normalized.charAt(beforeI);
+            if (!Character.isWhitespace(ch) && (Character.isLetterOrDigit(ch) || ch == '_' || ch == '$')) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean equalsIgnoreCase(char a, char b) {
+        return Character.toUpperCase(a) == Character.toUpperCase(b);
     }
 }
