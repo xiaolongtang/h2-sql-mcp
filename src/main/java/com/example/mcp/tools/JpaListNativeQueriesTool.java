@@ -12,42 +12,20 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.IOException;
 import java.nio.file.FileSystems;
-import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.SimpleFileVisitor;
-import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.stream.Collectors;
 
 public class JpaListNativeQueriesTool implements Tool {
     private static final int MAX_THREADS = 15;
-    private static final List<String> DEFAULT_INCLUDE_GLOBS = List.of("**/*.java", "**/*.kt");
-    private static final Set<String> DEFAULT_SKIPPED_DIRECTORY_NAMES = Set.of(
-            ".git",
-            ".svn",
-            ".hg",
-            ".idea",
-            ".vscode",
-            ".gradle",
-            ".mvn",
-            "node_modules",
-            "target",
-            "build",
-            "out",
-            "bin",
-            "dist",
-            "tmp",
-            "logs",
-            "__pycache__"
-    );
 
     private final ObjectMapper mapper;
     private final QueryExtractor extractor;
@@ -95,10 +73,6 @@ public class JpaListNativeQueriesTool implements Tool {
     public JsonNode call(JsonNode arguments) throws Exception {
         List<Path> roots = readPathArray(arguments.get("rootDirs"));
         List<String> includeGlobs = readStringArray(arguments.get("includeGlobs"));
-        boolean usingDefaultIncludes = includeGlobs.isEmpty() || includeGlobs.equals(DEFAULT_INCLUDE_GLOBS);
-        if (usingDefaultIncludes) {
-            includeGlobs = DEFAULT_INCLUDE_GLOBS;
-        }
         List<String> excludeGlobs = readStringArray(arguments.get("excludeGlobs"));
 
         ArrayNode queriesNode = mapper.createArrayNode();
@@ -109,8 +83,10 @@ public class JpaListNativeQueriesTool implements Tool {
                 continue;
             }
             List<Path> files;
-            try {
-                files = collectCandidateFiles(root, includeGlobs, excludeGlobs, usingDefaultIncludes);
+            try (var stream = Files.walk(root)) {
+                files = stream.filter(Files::isRegularFile)
+                        .filter(path -> shouldInclude(root, path, includeGlobs, excludeGlobs))
+                        .collect(Collectors.toList());
             } catch (IOException e) {
                 throw new RuntimeException("Failed to scan root: " + root, e);
             }
@@ -172,45 +148,10 @@ public class JpaListNativeQueriesTool implements Tool {
     }
 
     private boolean matchesGlob(String path, String glob) {
-        String globForSystem = normalizeGlobForSystem(glob);
+        String globForSystem = normalizeToSystemSeparators(glob);
         Path pathForSystem = Path.of(normalizeToSystemSeparators(path));
         return FileSystems.getDefault().getPathMatcher("glob:" + globForSystem)
                 .matches(pathForSystem);
-    }
-
-    private List<Path> collectCandidateFiles(Path root, List<String> includes, List<String> excludes, boolean usingDefaultIncludes) throws IOException {
-        List<Path> files = new ArrayList<>();
-        Files.walkFileTree(root, new SimpleFileVisitor<>() {
-            @Override
-            public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
-                if (shouldSkipDirectory(root, dir, usingDefaultIncludes)) {
-                    return FileVisitResult.SKIP_SUBTREE;
-                }
-                return FileVisitResult.CONTINUE;
-            }
-
-            @Override
-            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
-                if (attrs.isRegularFile() && shouldInclude(root, file, includes, excludes)) {
-                    files.add(file);
-                }
-                return FileVisitResult.CONTINUE;
-            }
-        });
-        return files;
-    }
-
-    private boolean shouldSkipDirectory(Path root, Path dir, boolean usingDefaultIncludes) {
-        if (!usingDefaultIncludes || dir.equals(root)) {
-            return false;
-        }
-        Path name = dir.getFileName();
-        if (name == null) {
-            return false;
-        }
-        String directoryName = name.toString();
-        String normalized = directoryName.toLowerCase(Locale.ROOT);
-        return DEFAULT_SKIPPED_DIRECTORY_NAMES.contains(normalized);
     }
 
     private List<Path> readPathArray(JsonNode node) {
@@ -298,18 +239,6 @@ public class JpaListNativeQueriesTool implements Tool {
             return path.replace('/', '\\');
         }
         return path.replace('\\', '/');
-    }
-
-    private String normalizeGlobForSystem(String glob) {
-        if (glob == null) {
-            return null;
-        }
-        String normalized = glob.replace('\\', '/');
-        String separator = FileSystems.getDefault().getSeparator();
-        if ("\\".equals(separator)) {
-            return normalized.replace("/", "\\\\");
-        }
-        return normalized;
     }
 
     private record FileScanResult(List<QueryItem> items, List<String> errors) {
