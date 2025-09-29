@@ -15,10 +15,9 @@ import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.LinkedHashMap;
+import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -27,8 +26,6 @@ import java.util.stream.Collectors;
 
 public class JpaListNativeQueriesTool implements Tool {
     private static final int MAX_THREADS = 15;
-    private static final int DEFAULT_LIMIT = 50;
-    private static final int MAX_LIMIT = 500;
 
     private final ObjectMapper mapper;
     private final QueryExtractor extractor;
@@ -56,15 +53,6 @@ public class JpaListNativeQueriesTool implements Tool {
         properties.set("rootDirs", arrayOfStrings());
         properties.set("includeGlobs", arrayOfStrings());
         properties.set("excludeGlobs", arrayOfStrings());
-        properties.set("limit", paginationField(
-                "Maximum number of results to return (default " + DEFAULT_LIMIT + ", max " + MAX_LIMIT + ").",
-                DEFAULT_LIMIT, 1));
-        properties.set("cursor", paginationField(
-                "Zero-based index from which to continue the result set.", null, 0));
-        properties.set("offset", paginationField(
-                "Alias for cursor.", null, 0));
-        properties.set("maxSqlLength", paginationField(
-                "Optional maximum length for SQL text fields; longer queries will be truncated.", null, 1));
         schema.set("properties", properties);
         ArrayNode required = mapper.createArrayNode();
         required.add("rootDirs");
@@ -87,12 +75,9 @@ public class JpaListNativeQueriesTool implements Tool {
         List<String> includeGlobs = readStringArray(arguments.get("includeGlobs"));
         List<String> excludeGlobs = readStringArray(arguments.get("excludeGlobs"));
 
-        int limit = determineLimit(arguments);
-        int cursor = determineCursor(arguments);
-        Integer maxSqlLength = determineMaxSqlLength(arguments);
-
-        Map<String, QueryItem> deduped = new LinkedHashMap<>();
+        ArrayNode queriesNode = mapper.createArrayNode();
         ArrayNode errorsNode = mapper.createArrayNode();
+        Set<String> seen = new HashSet<>();
         for (Path root : roots) {
             if (!Files.exists(root)) {
                 continue;
@@ -130,7 +115,9 @@ public class JpaListNativeQueriesTool implements Tool {
                     }
                     for (QueryItem item : result.items()) {
                         String key = item.id() + "@" + item.file();
-                        deduped.putIfAbsent(key, item);
+                        if (seen.add(key)) {
+                            queriesNode.add(serialize(item));
+                        }
                     }
                     for (String error : result.errors()) {
                         errorsNode.add(error);
@@ -140,65 +127,12 @@ public class JpaListNativeQueriesTool implements Tool {
                 executor.shutdownNow();
             }
         }
-        List<QueryItem> allItems = new ArrayList<>(deduped.values());
-        allItems.sort(Comparator.comparing(QueryItem::file, Comparator.nullsLast(String::compareTo))
-                .thenComparing(QueryItem::id, Comparator.nullsLast(String::compareTo)));
-
-        int totalCount = allItems.size();
-        int startIndex = Math.max(Math.min(cursor, totalCount), 0);
-        int effectiveLimit = Math.max(1, Math.min(limit, MAX_LIMIT));
-        int endIndex = Math.min(startIndex + effectiveLimit, totalCount);
-
-        List<QueryItem> page = allItems.subList(startIndex, endIndex);
-        ArrayNode queriesNode = mapper.createArrayNode();
-        for (QueryItem item : page) {
-            queriesNode.add(serialize(item, maxSqlLength));
-        }
-
         ObjectNode result = mapper.createObjectNode();
         result.set("queries", queriesNode);
-        result.put("totalCount", totalCount);
-        result.put("limit", effectiveLimit);
-        result.put("cursor", startIndex);
-        if (endIndex < totalCount) {
-            result.put("nextCursor", endIndex);
-        }
         if (!errorsNode.isEmpty()) {
             result.set("errors", errorsNode);
         }
         return result;
-    }
-
-    private int determineLimit(JsonNode arguments) {
-        JsonNode limitNode = arguments.get("limit");
-        int requested = limitNode != null && limitNode.isNumber()
-                ? limitNode.asInt(DEFAULT_LIMIT)
-                : DEFAULT_LIMIT;
-        if (requested < 1) {
-            requested = 1;
-        }
-        return Math.min(requested, MAX_LIMIT);
-    }
-
-    private int determineCursor(JsonNode arguments) {
-        JsonNode cursorNode = arguments.has("cursor") ? arguments.get("cursor") : arguments.get("offset");
-        if (cursorNode == null || !cursorNode.isNumber()) {
-            return 0;
-        }
-        int cursor = cursorNode.asInt(0);
-        return Math.max(cursor, 0);
-    }
-
-    private Integer determineMaxSqlLength(JsonNode arguments) {
-        JsonNode node = arguments.get("maxSqlLength");
-        if (node == null || !node.isNumber()) {
-            return null;
-        }
-        int value = node.asInt();
-        if (value < 1) {
-            return null;
-        }
-        return value;
     }
 
     private boolean shouldInclude(Path root, Path file, List<String> includes, List<String> excludes) {
@@ -257,14 +191,14 @@ public class JpaListNativeQueriesTool implements Tool {
         }
     }
 
-    private ObjectNode serialize(QueryItem item, Integer maxSqlLength) {
+    private ObjectNode serialize(QueryItem item) {
         ObjectNode node = mapper.createObjectNode();
         node.put("id", item.id());
         node.put("file", item.file());
         node.put("repo", item.repo());
         putNullable(node, "method", item.method());
-        node.put("sqlRaw", maybeTruncate(item.sqlRaw(), maxSqlLength));
-        node.put("sqlNormalized", maybeTruncate(item.sqlNormalized(), maxSqlLength));
+        node.put("sqlRaw", item.sqlRaw());
+        node.put("sqlNormalized", item.sqlNormalized());
         ArrayNode placeholders = mapper.createArrayNode();
         for (Placeholder placeholder : item.placeholders()) {
             ObjectNode placeholderNode = mapper.createObjectNode();
@@ -282,22 +216,6 @@ public class JpaListNativeQueriesTool implements Tool {
         }
         node.set("ruleHits", hits);
         return node;
-    }
-
-    private String maybeTruncate(String value, Integer maxSqlLength) {
-        if (value == null || maxSqlLength == null) {
-            return value;
-        }
-        if (value.length() <= maxSqlLength) {
-            return value;
-        }
-        if (maxSqlLength == 1) {
-            return "…";
-        }
-        if (maxSqlLength == 2) {
-            return value.substring(0, 1) + "…";
-        }
-        return value.substring(0, maxSqlLength - 1) + "…";
     }
 
     private void putNullable(ObjectNode node, String key, String value) {
@@ -321,17 +239,6 @@ public class JpaListNativeQueriesTool implements Tool {
             return path.replace('/', '\\');
         }
         return path.replace('\\', '/');
-    }
-
-    private ObjectNode paginationField(String description, Integer defaultValue, int minimum) {
-        ObjectNode node = mapper.createObjectNode();
-        node.put("type", "integer");
-        node.put("minimum", minimum);
-        node.put("description", description);
-        if (defaultValue != null) {
-            node.put("default", defaultValue);
-        }
-        return node;
     }
 
     private record FileScanResult(List<QueryItem> items, List<String> errors) {
