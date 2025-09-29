@@ -16,6 +16,12 @@ import io.modelcontextprotocol.spec.McpSchema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.net.URISyntaxException;
+import java.net.URL;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.security.CodeSource;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -25,6 +31,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public class McpServer {
 
+    private static final String LOG_FILE_PATH = configureSimpleLogger();
     private static final Logger LOGGER = LoggerFactory.getLogger(McpServer.class);
 
     private final ObjectMapper mapper = new ObjectMapper();
@@ -46,6 +53,10 @@ public class McpServer {
                 .map(this::toToolSpecification)
                 .toList();
 
+        if (LOG_FILE_PATH != null) {
+            LOGGER.info("Logging MCP server output to {}", LOG_FILE_PATH);
+        }
+
         StdioServerTransportProvider transportProvider = new StdioServerTransportProvider(mcpJsonMapper);
 
         McpSyncServer server = io.modelcontextprotocol.server.McpServer
@@ -56,6 +67,57 @@ public class McpServer {
                 .build();
 
         keepServerAlive(server, tools.size());
+    }
+
+    private static String configureSimpleLogger() {
+        String existing = System.getProperty("org.slf4j.simpleLogger.logFile");
+        if (existing != null && !existing.isBlank()) {
+            return existing;
+        }
+
+        try {
+            Path logFile = resolveLogFilePath();
+            if (logFile == null) {
+                return null;
+            }
+            Path parent = logFile.getParent();
+            if (parent != null && Files.notExists(parent)) {
+                Files.createDirectories(parent);
+            }
+            String absolutePath = logFile.toAbsolutePath().toString();
+            System.setProperty("org.slf4j.simpleLogger.logFile", absolutePath);
+            return absolutePath;
+        } catch (Exception ex) {
+            System.err.println("Failed to configure simple logger file output: " + ex.getMessage());
+            return null;
+        }
+    }
+
+    private static Path resolveLogFilePath() throws URISyntaxException {
+        CodeSource codeSource = McpServer.class.getProtectionDomain().getCodeSource();
+        if (codeSource == null) {
+            return null;
+        }
+
+        URL location = codeSource.getLocation();
+        if (location == null) {
+            return null;
+        }
+
+        Path resolvedPath = Paths.get(location.toURI());
+        if (Files.isRegularFile(resolvedPath)) {
+            Path jarDir = resolvedPath.getParent();
+            if (jarDir != null) {
+                return jarDir.resolve("mcp-server.log");
+            }
+            return null;
+        }
+
+        if (Files.isDirectory(resolvedPath)) {
+            return resolvedPath.resolve("mcp-server.log");
+        }
+
+        return null;
     }
 
     private void keepServerAlive(McpSyncServer server, int toolCount) {
