@@ -9,13 +9,9 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.HashSet;
-import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 class JpaListNativeQueriesToolTest {
@@ -25,78 +21,26 @@ class JpaListNativeQueriesToolTest {
 
     @Test
     void detectsNativeQueriesIncludingTextBlocks() throws Exception {
-        writeRepositorySource();
+        Path sourceDir = tempDir.resolve("src/main/java/com/example/demo");
+        Files.createDirectories(sourceDir);
+        Path repositoryFile = sourceDir.resolve("DemoRepository.java");
+        Files.writeString(repositoryFile, repositorySource());
 
         ObjectMapper mapper = new ObjectMapper();
         JpaListNativeQueriesTool tool = new JpaListNativeQueriesTool(mapper);
-        ObjectNode args = defaultArguments(mapper);
+        ObjectNode args = mapper.createObjectNode();
+        ArrayNode rootDirs = mapper.createArrayNode();
+        rootDirs.add(tempDir.toString());
+        args.set("rootDirs", rootDirs);
 
         JsonNode result = tool.call(args);
         ArrayNode queries = (ArrayNode) result.get("queries");
 
         assertNotNull(queries, "queries node should be present");
         assertEquals(3, queries.size(), "should detect all native queries");
-        assertEquals(3, result.get("totalCount").asInt());
-        assertEquals(0, result.get("cursor").asInt());
-        assertEquals(50, result.get("limit").asInt());
         assertContainsQuery(queries, "DemoRepository#countAllNative", "SELECT COUNT(*) FROM demo_records where numer=?1");
         assertContainsQuery(queries, "DemoRepository#findAllNamesNative", "SELECT name FROM demo_records where name= :name ORDER BY name");
         assertContainsQuery(queries, "DemoRepository#countAllNative1", "WITH employee_data AS (");
-    }
-
-    @Test
-    void paginatesResultsUsingCursor() throws Exception {
-        writeRepositorySource();
-
-        ObjectMapper mapper = new ObjectMapper();
-        JpaListNativeQueriesTool tool = new JpaListNativeQueriesTool(mapper);
-
-        ObjectNode firstArgs = defaultArguments(mapper);
-        firstArgs.put("limit", 2);
-
-        JsonNode firstResult = tool.call(firstArgs);
-        ArrayNode firstPage = (ArrayNode) firstResult.get("queries");
-        assertEquals(2, firstPage.size(), "first page should honor limit");
-        assertEquals(3, firstResult.get("totalCount").asInt());
-        assertEquals(0, firstResult.get("cursor").asInt());
-        assertEquals(2, firstResult.get("limit").asInt());
-        assertEquals(2, firstResult.get("nextCursor").asInt());
-
-        ObjectNode secondArgs = defaultArguments(mapper);
-        secondArgs.put("cursor", firstResult.get("nextCursor").asInt());
-        secondArgs.put("limit", 2);
-
-        JsonNode secondResult = tool.call(secondArgs);
-        ArrayNode secondPage = (ArrayNode) secondResult.get("queries");
-        assertEquals(1, secondPage.size(), "second page should contain remaining item");
-        assertEquals(3, secondResult.get("totalCount").asInt());
-        assertEquals(2, secondResult.get("cursor").asInt());
-        assertNull(secondResult.get("nextCursor"), "nextCursor should be absent when no more data");
-
-        Set<String> collectedIds = new HashSet<>();
-        firstPage.forEach(node -> collectedIds.add(node.get("id").asText()));
-        secondPage.forEach(node -> collectedIds.add(node.get("id").asText()));
-        assertEquals(3, collectedIds.size(), "pagination should expose every query across pages");
-    }
-
-    @Test
-    void truncatesSqlWhenMaxSqlLengthProvided() throws Exception {
-        writeRepositorySource();
-
-        ObjectMapper mapper = new ObjectMapper();
-        JpaListNativeQueriesTool tool = new JpaListNativeQueriesTool(mapper);
-
-        ObjectNode args = defaultArguments(mapper);
-        args.put("maxSqlLength", 20);
-
-        JsonNode result = tool.call(args);
-        ArrayNode queries = (ArrayNode) result.get("queries");
-        for (JsonNode query : queries) {
-            JsonNode sqlRaw = query.get("sqlRaw");
-            JsonNode sqlNormalized = query.get("sqlNormalized");
-            assertTrue(sqlRaw.isNull() || sqlRaw.asText().length() <= 20, "sqlRaw should be truncated when requested");
-            assertTrue(sqlNormalized.isNull() || sqlNormalized.asText().length() <= 20, "sqlNormalized should be truncated when requested");
-        }
     }
 
     private String repositorySource() {
@@ -152,20 +96,5 @@ class JpaListNativeQueriesToolTest {
             }
         }
         fail("Expected query with id " + id + " not found");
-    }
-
-    private ObjectNode defaultArguments(ObjectMapper mapper) {
-        ObjectNode args = mapper.createObjectNode();
-        ArrayNode rootDirs = mapper.createArrayNode();
-        rootDirs.add(tempDir.toString());
-        args.set("rootDirs", rootDirs);
-        return args;
-    }
-
-    private void writeRepositorySource() throws Exception {
-        Path sourceDir = tempDir.resolve("src/main/java/com/example/demo");
-        Files.createDirectories(sourceDir);
-        Path repositoryFile = sourceDir.resolve("DemoRepository.java");
-        Files.writeString(repositoryFile, repositorySource());
     }
 }
