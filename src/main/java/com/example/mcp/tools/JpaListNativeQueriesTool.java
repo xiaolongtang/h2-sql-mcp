@@ -53,6 +53,9 @@ public class JpaListNativeQueriesTool implements Tool {
         properties.set("rootDirs", arrayOfStrings());
         properties.set("includeGlobs", arrayOfStrings());
         properties.set("excludeGlobs", arrayOfStrings());
+        ObjectNode collapseWhitespace = mapper.createObjectNode();
+        collapseWhitespace.put("type", "boolean");
+        properties.set("collapseWhitespace", collapseWhitespace);
         schema.set("properties", properties);
         ArrayNode required = mapper.createArrayNode();
         required.add("rootDirs");
@@ -74,6 +77,7 @@ public class JpaListNativeQueriesTool implements Tool {
         List<Path> roots = readPathArray(arguments.get("rootDirs"));
         List<String> includeGlobs = readStringArray(arguments.get("includeGlobs"));
         List<String> excludeGlobs = readStringArray(arguments.get("excludeGlobs"));
+        boolean collapseWhitespace = readBoolean(arguments.get("collapseWhitespace"), false);
 
         ArrayNode queriesNode = mapper.createArrayNode();
         ArrayNode errorsNode = mapper.createArrayNode();
@@ -116,7 +120,7 @@ public class JpaListNativeQueriesTool implements Tool {
                     for (QueryItem item : result.items()) {
                         String key = item.id() + "@" + item.file();
                         if (seen.add(key)) {
-                            queriesNode.add(serialize(item));
+                            queriesNode.add(serialize(item, collapseWhitespace));
                         }
                     }
                     for (String error : result.errors()) {
@@ -191,13 +195,13 @@ public class JpaListNativeQueriesTool implements Tool {
         }
     }
 
-    private ObjectNode serialize(QueryItem item) {
+    private ObjectNode serialize(QueryItem item, boolean collapseWhitespace) {
         ObjectNode node = mapper.createObjectNode();
         node.put("id", item.id());
         node.put("file", item.file());
         node.put("repo", item.repo());
         putNullable(node, "method", item.method());
-        node.put("sqlRaw", item.sqlRaw());
+        node.put("sqlRaw", collapseWhitespace ? collapseSqlWhitespace(item.sqlRaw()) : item.sqlRaw());
         node.put("sqlNormalized", item.sqlNormalized());
         ArrayNode placeholders = mapper.createArrayNode();
         for (Placeholder placeholder : item.placeholders()) {
@@ -216,6 +220,63 @@ public class JpaListNativeQueriesTool implements Tool {
         }
         node.set("ruleHits", hits);
         return node;
+    }
+
+    private boolean readBoolean(JsonNode node, boolean defaultValue) {
+        if (node == null || node.isNull()) {
+            return defaultValue;
+        }
+        if (node.isBoolean()) {
+            return node.booleanValue();
+        }
+        if (node.isTextual()) {
+            String text = node.asText();
+            if ("true".equalsIgnoreCase(text)) {
+                return true;
+            }
+            if ("false".equalsIgnoreCase(text)) {
+                return false;
+            }
+        }
+        return defaultValue;
+    }
+
+    private String collapseSqlWhitespace(String sql) {
+        if (sql == null) {
+            return null;
+        }
+        StringBuilder result = new StringBuilder(sql.length());
+        boolean previousWasSpace = false;
+        boolean skipIndent = false;
+        for (int i = 0; i < sql.length(); i++) {
+            char ch = sql.charAt(i);
+            if (ch == '\r') {
+                continue;
+            }
+            if (ch == '\n') {
+                if (!previousWasSpace && result.length() > 0) {
+                    result.append(' ');
+                    previousWasSpace = true;
+                }
+                skipIndent = true;
+                continue;
+            }
+            if (skipIndent && (ch == ' ' || ch == '\t')) {
+                continue;
+            }
+            skipIndent = false;
+            result.append(ch);
+            previousWasSpace = Character.isWhitespace(ch);
+        }
+        int start = 0;
+        int end = result.length();
+        while (start < end && Character.isWhitespace(result.charAt(start))) {
+            start++;
+        }
+        while (end > start && Character.isWhitespace(result.charAt(end - 1))) {
+            end--;
+        }
+        return result.substring(start, end);
     }
 
     private void putNullable(ObjectNode node, String key, String value) {
