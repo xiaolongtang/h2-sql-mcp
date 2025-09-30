@@ -21,10 +21,7 @@ class JpaListNativeQueriesToolTest {
 
     @Test
     void detectsNativeQueriesIncludingTextBlocks() throws Exception {
-        Path sourceDir = tempDir.resolve("src/main/java/com/example/demo");
-        Files.createDirectories(sourceDir);
-        Path repositoryFile = sourceDir.resolve("DemoRepository.java");
-        Files.writeString(repositoryFile, repositorySource());
+        prepareRepository();
 
         ObjectMapper mapper = new ObjectMapper();
         JpaListNativeQueriesTool tool = new JpaListNativeQueriesTool(mapper);
@@ -41,6 +38,49 @@ class JpaListNativeQueriesToolTest {
         assertContainsQuery(queries, "DemoRepository#countAllNative", "SELECT COUNT(*) FROM demo_records where numer=?1");
         assertContainsQuery(queries, "DemoRepository#findAllNamesNative", "SELECT name FROM demo_records where name= :name ORDER BY name");
         assertContainsQuery(queries, "DemoRepository#countAllNative1", "WITH employee_data AS (");
+    }
+
+    @Test
+    void collapsesWhitespaceWhenRequested() throws Exception {
+        prepareRepository();
+
+        ObjectMapper mapper = new ObjectMapper();
+        JpaListNativeQueriesTool tool = new JpaListNativeQueriesTool(mapper);
+        ObjectNode args = mapper.createObjectNode();
+        ArrayNode rootDirs = mapper.createArrayNode();
+        rootDirs.add(tempDir.toString());
+        args.set("rootDirs", rootDirs);
+        args.put("collapseWhitespace", true);
+
+        JsonNode result = tool.call(args);
+        ArrayNode queries = (ArrayNode) result.get("queries");
+
+        assertNotNull(queries, "queries node should be present");
+        JsonNode textBlockQuery = null;
+        for (JsonNode query : queries) {
+            if ("DemoRepository#countAllNative1".equals(query.get("id").asText())) {
+                textBlockQuery = query;
+                break;
+            }
+        }
+        if (textBlockQuery == null) {
+            fail("Text block query should be detected");
+        }
+        String sql = textBlockQuery.get("sqlRaw").asText();
+        assertNotNull(sql, "sql should be present");
+        if (sql.contains("\n") || sql.contains("\r")) {
+            fail("Collapsed SQL should not contain newline characters");
+        }
+        if (!sql.contains("LPAD(' ', (LEVEL - 1) * 2) || employee_name AS indented_name,")) {
+            fail("Collapsed SQL should preserve embedded single-space literals");
+        }
+    }
+
+    private void prepareRepository() throws Exception {
+        Path sourceDir = tempDir.resolve("src/main/java/com/example/demo");
+        Files.createDirectories(sourceDir);
+        Path repositoryFile = sourceDir.resolve("DemoRepository.java");
+        Files.writeString(repositoryFile, repositorySource());
     }
 
     private String repositorySource() {
