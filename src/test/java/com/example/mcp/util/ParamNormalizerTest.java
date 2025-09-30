@@ -32,4 +32,22 @@ class ParamNormalizerTest {
         assertEquals("select * from dummy where id in (?)", result.sql());
         assertEquals(List.of(":ids"), result.placeholders().stream().map(Placeholder::token).toList());
     }
+
+    @Test
+    void leavesSubselectArgumentsUntouched() {
+        String sql = "select * from dummy where id in (select id from other)";
+
+        ParamNormalizer.Result result = ParamNormalizer.normalize(sql);
+
+        assertEquals(sql, result.sql());
+    }
+
+    @Test
+    void leavesSubselectArgumentsUntouchedForNotIn() {
+        String sql = "select * from dummy where id not in (select id from other)";
+
+        ParamNormalizer.Result result = ParamNormalizer.normalize(sql);
+
+        assertEquals(sql, result.sql());
+    }
 }

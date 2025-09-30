@@ -99,7 +99,7 @@ public final class ParamNormalizer {
                 }
                 String token = sql.substring(start, i);
                 placeholders.add(new Placeholder("positional", token));
-                appendPlaceholder(normalized, '?');
+                appendPlaceholder(sql, normalized, start);
                 i--;
                 continue;
             }
@@ -116,7 +116,7 @@ public final class ParamNormalizer {
                 }
                 String token = sql.substring(start, i);
                 placeholders.add(new Placeholder("named", token));
-                appendPlaceholder(normalized, '?');
+                appendPlaceholder(sql, normalized, start);
                 i--;
                 continue;
             }
@@ -127,15 +127,15 @@ public final class ParamNormalizer {
         return new Result(normalized.toString(), placeholders);
     }
 
-    private static void appendPlaceholder(StringBuilder normalized, char placeholder) {
-        if (needsInClauseWrapping(normalized)) {
-            normalized.append('(').append(placeholder).append(')');
+    private static void appendPlaceholder(String sql, StringBuilder normalized, int placeholderStart) {
+        if (needsInClauseWrapping(sql, normalized, placeholderStart)) {
+            normalized.append('(').append('?').append(')');
         } else {
-            normalized.append(placeholder);
+            normalized.append('?');
         }
     }
 
-    private static boolean needsInClauseWrapping(StringBuilder normalized) {
+    private static boolean needsInClauseWrapping(String sql, StringBuilder normalized, int placeholderStart) {
         int index = normalized.length() - 1;
         while (index >= 0 && Character.isWhitespace(normalized.charAt(index))) {
             index--;
@@ -143,20 +143,40 @@ public final class ParamNormalizer {
         if (index >= 0 && normalized.charAt(index) == '(') {
             return false;
         }
-        if (index < 0 || !equalsIgnoreCase(normalized.charAt(index), 'n')) {
+        index = placeholderStart - 1;
+        while (index >= 0 && Character.isWhitespace(sql.charAt(index))) {
+            index--;
+        }
+        if (index >= 0 && sql.charAt(index) == '(') {
+            return false;
+        }
+        if (index < 0 || !equalsIgnoreCase(sql.charAt(index), 'n')) {
             return false;
         }
         index--;
-        while (index >= 0 && Character.isWhitespace(normalized.charAt(index))) {
+        while (index >= 0 && Character.isWhitespace(sql.charAt(index))) {
             index--;
         }
-        if (index < 0 || !equalsIgnoreCase(normalized.charAt(index), 'i')) {
+        if (index < 0 || !equalsIgnoreCase(sql.charAt(index), 'i')) {
             return false;
         }
         int beforeI = index - 1;
         if (beforeI >= 0) {
-            char ch = normalized.charAt(beforeI);
+            char ch = sql.charAt(beforeI);
             if (!Character.isWhitespace(ch) && (Character.isLetterOrDigit(ch) || ch == '_' || ch == '$')) {
+                return false;
+            }
+        }
+        int afterIn = index + 1;
+        while (afterIn < placeholderStart && Character.isWhitespace(sql.charAt(afterIn))) {
+            afterIn++;
+        }
+        if (afterIn < placeholderStart && sql.charAt(afterIn) == '(') {
+            int afterParen = afterIn + 1;
+            while (afterParen < placeholderStart && Character.isWhitespace(sql.charAt(afterParen))) {
+                afterParen++;
+            }
+            if (afterParen < placeholderStart && startsWithIgnoreCase(sql, afterParen, "select")) {
                 return false;
             }
         }
@@ -165,5 +185,17 @@ public final class ParamNormalizer {
 
     private static boolean equalsIgnoreCase(char a, char b) {
         return Character.toUpperCase(a) == Character.toUpperCase(b);
+    }
+
+    private static boolean startsWithIgnoreCase(String value, int index, String keyword) {
+        if (index < 0 || index + keyword.length() > value.length()) {
+            return false;
+        }
+        for (int i = 0; i < keyword.length(); i++) {
+            if (!equalsIgnoreCase(value.charAt(index + i), keyword.charAt(i))) {
+                return false;
+            }
+        }
+        return true;
     }
 }
