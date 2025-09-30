@@ -2,9 +2,11 @@ package com.example.mcp;
 
 import com.example.mcp.tools.H2PrepareTool;
 import com.example.mcp.tools.JpaListNativeQueriesTool;
+import com.example.mcp.tools.PrepareReportTool;
 import com.example.mcp.tools.SqlRewriteTool;
 import com.example.mcp.tools.Tool;
 import com.example.mcp.tools.ToolRegistry;
+import com.example.mcp.util.JarLocationResolver;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -16,12 +18,8 @@ import io.modelcontextprotocol.spec.McpSchema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.net.URISyntaxException;
-import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.security.CodeSource;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -41,6 +39,7 @@ public class McpServer {
     public McpServer() {
         registry.register(new JpaListNativeQueriesTool(mapper));
         registry.register(new H2PrepareTool(mapper));
+        registry.register(new PrepareReportTool(mapper));
         registry.register(new SqlRewriteTool(mapper));
     }
 
@@ -93,31 +92,12 @@ public class McpServer {
         }
     }
 
-    private static Path resolveLogFilePath() throws URISyntaxException {
-        CodeSource codeSource = McpServer.class.getProtectionDomain().getCodeSource();
-        if (codeSource == null) {
+    private static Path resolveLogFilePath() {
+        Path jarDirectory = JarLocationResolver.resolveJarDirectory(McpServer.class);
+        if (jarDirectory == null) {
             return null;
         }
-
-        URL location = codeSource.getLocation();
-        if (location == null) {
-            return null;
-        }
-
-        Path resolvedPath = Paths.get(location.toURI());
-        if (Files.isRegularFile(resolvedPath)) {
-            Path jarDir = resolvedPath.getParent();
-            if (jarDir != null) {
-                return jarDir.resolve("mcp-server.log");
-            }
-            return null;
-        }
-
-        if (Files.isDirectory(resolvedPath)) {
-            return resolvedPath.resolve("mcp-server.log");
-        }
-
-        return null;
+        return jarDirectory.resolve("mcp-server.log");
     }
 
     private void keepServerAlive(McpSyncServer server, int toolCount) {
