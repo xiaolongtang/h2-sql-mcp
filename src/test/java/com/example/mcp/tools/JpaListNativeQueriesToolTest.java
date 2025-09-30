@@ -34,10 +34,20 @@ class JpaListNativeQueriesToolTest {
         ArrayNode queries = (ArrayNode) result.get("queries");
 
         assertNotNull(queries, "queries node should be present");
-        assertEquals(3, queries.size(), "should detect all native queries");
+        assertEquals(4, queries.size(), "should detect all native queries");
         assertContainsQuery(queries, "DemoRepository#countAllNative", "SELECT COUNT(*) FROM demo_records where numer=?1");
         assertContainsQuery(queries, "DemoRepository#findAllNamesNative", "SELECT name FROM demo_records where name= :name ORDER BY name");
         assertContainsQuery(queries, "DemoRepository#countAllNative1", "WITH employee_data AS (");
+        JsonNode subselectQuery = assertContainsQuery(
+                queries,
+                "DemoRepository#findWithSubselect",
+                "SELECT * FROM aa WHERE aa.id IN (SELECT id FROM bb)"
+        );
+        assertEquals(
+                "SELECT * FROM aa WHERE aa.id IN (SELECT id FROM bb)",
+                subselectQuery.get("sqlNormalized").asText(),
+                "sqlNormalized should preserve subselect contents"
+        );
     }
 
     @Test
@@ -101,6 +111,9 @@ class JpaListNativeQueriesToolTest {
                 "    @org.springframework.data.jpa.repository.Query(value = \"SELECT name FROM demo_records where name= :name ORDER BY name\", nativeQuery = true)\n" +
                 "    List<Object> findAllNamesNative(String name);\n" +
                 "\n" +
+                "    @Query(value = \"SELECT * FROM aa WHERE aa.id IN (SELECT id FROM bb)\", nativeQuery = true)\n" +
+                "    List<Object> findWithSubselect();\n" +
+                "\n" +
                 "    @Query(value = \"\"\"\n" +
                 "WITH employee_data AS (\n" +
                 "    SELECT 100 AS employee_id, 'Steven King' AS employee_name, NULL AS manager_id FROM DUAL UNION ALL\n" +
@@ -124,7 +137,7 @@ class JpaListNativeQueriesToolTest {
                 "    Long countAllNative1();\n" +
                 "}\n";
     }
-    private void assertContainsQuery(ArrayNode queries, String id, String expectedSqlFragment) {
+    private JsonNode assertContainsQuery(ArrayNode queries, String id, String expectedSqlFragment) {
         for (JsonNode query : queries) {
             if (id.equals(query.get("id").asText())) {
                 String sql = query.get("sqlRaw").asText();
@@ -132,9 +145,10 @@ class JpaListNativeQueriesToolTest {
                 if (!sql.contains(expectedSqlFragment)) {
                     fail("SQL for " + id + " did not contain expected fragment");
                 }
-                return;
+                return query;
             }
         }
         fail("Expected query with id " + id + " not found");
+        return null;
     }
 }
